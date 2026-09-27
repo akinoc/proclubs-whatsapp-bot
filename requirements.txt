@@ -1,0 +1,1 @@
+fastapi==0.115.12\nuvicorn[standard]==0.34.3\nSQLAlchemy==2.0.41\npsycopg[binary]==3.2.9\nhttpx==0.28.1\n

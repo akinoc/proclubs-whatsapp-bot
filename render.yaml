@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: proclubs-meta-whatsapp-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: TIMEZONE
+        value: Europe/Istanbul
+      - key: PYTHON_VERSION
+        value: 3.13.7
+      - key: META_GRAPH_VERSION
+        value: v23.0
+      - key: DATABASE_URL
+        sync: false
+      - key: ADMIN_PHONE
+        sync: false
+      - key: META_ACCESS_TOKEN
+        sync: false
+      - key: META_PHONE_NUMBER_ID
+        sync: false
+      - key: META_WABA_ID
+        sync: false
+      - key: META_VERIFY_TOKEN
+        sync: false
+      - key: META_INVITE_TEMPLATE_NAME
+        sync: false
+      - key: META_INVITE_TEMPLATE_LANG
+        value: tr
