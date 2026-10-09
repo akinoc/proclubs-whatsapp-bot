@@ -85,9 +85,9 @@ class ReminderDispatch(Base):
 
 
 class Reminder2115Dispatch(Base):
-    """Separate once-per-day claim for the new 21:15 reminder schedule.
+    """Existing once-per-day claim table, retained for compatibility with prior deployments.
 
-    Previous 20:30 attempts remain in the legacy reminder_dispatches table.
+    The name is historical; the daily reminder now runs at 20:00.
     """
     __tablename__ = "reminder_2115_dispatches"
     id = Column(Integer, primary_key=True)
@@ -400,7 +400,7 @@ async def dispatch_reminders():
                 meta_result = await send_reminder_template(user.phone)
                 for message in meta_result.get("messages", []):
                     if message.get("id"):
-                        _track_outgoing(message["id"], user.phone, "reminder_2115")
+                        _track_outgoing(message["id"], user.phone, "reminder_daily")
                 claim = db.get(Reminder2115Dispatch, claim_id)
                 claim.state = "SENT"
                 db.commit()
@@ -570,7 +570,7 @@ async def process(phone, text):
             else:
                 preference.enabled = enabled
             db.commit()
-            return ("🔔 Her gün saat 21:15'te, yalnızca cevap vermediğin günlerde "
+            return ("🔔 Her gün saat 20:00'de, yalnızca cevap vermediğin günlerde "
                     "WhatsApp hatırlatmaları yeniden açıldı. İptal: *HATIRLATMA KAPAT*"
                     if enabled else "🔕 Otomatik hatırlatmalar kapatıldı.")
 
@@ -600,7 +600,7 @@ async def process(phone, text):
 
 @app.get("/")
 def root():
-    return {"service": "proclubs-meta-whatsapp-bot", "status": "ok", "version": "2026-10-2115-delivery"}
+    return {"service": "proclubs-meta-whatsapp-bot", "status": "ok", "version": "2026-10-2000-delivery"}
 
 
 @app.get("/health")
@@ -618,8 +618,8 @@ async def daily_reminder(request: Request):
         raise HTTPException(status_code=403, detail="Forbidden")
     now = datetime.now(TZ)
     # Do not send on accidental early or late scheduler invocations.
-    if now.hour != 21 or now.minute < 15 or now.minute > 30:
-        raise HTTPException(status_code=409, detail="Reminder is permitted only 21:15-21:30 Europe/Istanbul")
+    if now.hour != 20:
+        raise HTTPException(status_code=409, detail="Reminder is permitted only 20:00-20:59 Europe/Istanbul")
     # Trigger runs synchronously. At low subscriber counts, response will finish quickly.
     return await dispatch_reminders()
 
