@@ -84,6 +84,68 @@ class ReminderDispatch(Base):
     __table_args__ = (UniqueConstraint("user_id", "date", name="uq_reminder_user_day"),)
 
 
+class OutgoingDelivery(Base):
+    """Meta message ID to delivery-state mapping; no full phone numbers in logs."""
+    __tablename__ = "outgoing_deliveries"
+    message_id = Column(String(255), primary_key=True)
+    recipient_suffix = Column(String(8))
+    category = Column(String(30))
+    reminder_dispatch_id = Column(Integer, ForeignKey("reminder_dispatches.id"), nullable=True)
+    status = Column(String(30), nullable=False, default="accepted")
+    error_codes = Column(String(500))
+    error_details = Column(String(1000))
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(TZ))
+    status_at = Column(DateTime(timezone=True))
+
+
+def _track_outgoing(message_id, recipient, category, dispatch_id=None):
+    if not message_id:
+        return
+    with SessionLocal() as db:
+        record = db.get(OutgoingDelivery, message_id)
+        if record is None:
+            record = OutgoingDelivery(message_id=message_id)
+            db.add(record)
+        record.recipient_suffix = norm(recipient)[-4:]
+        record.category = category
+        if dispatch_id is not None:
+            record.reminder_dispatch_id = dispatch_id
+        # A status webhook can arrive before API response is saved. Preserve it.
+        if not record.status:
+            record.status = "accepted"
+        db.commit()
+
+
+def _track_delivery_status(event):
+    message_id = event.get("id")
+    if not message_id:
+        return
+    status = str(event.get("status") or "unknown")[:30]
+    recipient_suffix = norm(event.get("recipient_id", ""))[-4:]
+    errors = event.get("errors") or []
+    codes = ",".join(str(x.get("code", "")) for x in errors if isinstance(x, dict))[:500]
+    details = "; ".join(str(x.get("title") or x.get("message") or x.get("error_data", {}).get("details", ""))
+                        for x in errors if isinstance(x, dict))[:1000]
+    with SessionLocal() as db:
+        record = db.get(OutgoingDelivery, message_id)
+        if record is None:
+            record = OutgoingDelivery(message_id=message_id, recipient_suffix=recipient_suffix, category="unknown")
+            db.add(record)
+        elif not record.recipient_suffix:
+            record.recipient_suffix = recipient_suffix
+        # Ignore out-of-order regressions, while preserving failed reports.
+        rank = {"accepted": 0, "sent": 1, "delivered": 2, "read": 3, "failed": 4}
+        if status == "failed" or rank.get(status, 0) >= rank.get(record.status, 0):
+            record.status = status
+            record.status_at = datetime.now(TZ)
+            if codes:
+                record.error_codes = codes
+                record.error_details = details
+        db.commit()
+    logger.info("WHATSAPP_DELIVERY_STATUS id=%s to_suffix=%s status=%s error_codes=%s details=%s",
+                message_id, recipient_suffix, status, codes or "none", details or "none")
+
+
 Base.metadata.create_all(bind=engine)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("proclubs")
@@ -218,6 +280,8 @@ async def send_text(phone, text):
         outgoing_ids=[item.get("id") for item in r.json().get("messages", [])]
     except (ValueError, AttributeError):
         outgoing_ids=[]
+    for outgoing_id in outgoing_ids:
+        _track_outgoing(outgoing_id, phone, "text")
     logger.info("META_SEND_OK to_suffix=%s outgoing_ids=%s", norm(phone)[-4:], outgoing_ids)
 
 async def send_invite(phone, name):
@@ -257,7 +321,11 @@ async def send_reminder_template(phone: str):
     if response.is_error:
         logger.error("REMINDER_META_ERROR status=%s detail=%s", response.status_code, response.text[:800])
         response.raise_for_status()
-    return response.json()
+    payload_response = response.json()
+    message_ids = [m.get("id") for m in payload_response.get("messages", []) if m.get("id")]
+    logger.info("REMINDER_META_ACCEPTED to_suffix=%s message_ids=%s message_status=%s",
+                norm(phone)[-4:], message_ids, payload_response.get("messages"))
+    return payload_response
 
 
 def _claim_reminder(db, user_id, day):
@@ -303,7 +371,10 @@ async def dispatch_reminders():
                 skipped += 1
                 continue
             try:
-                await send_reminder_template(user.phone)
+                meta_result = await send_reminder_template(user.phone)
+                for message in meta_result.get("messages", []):
+                    if message.get("id"):
+                        _track_outgoing(message["id"], user.phone, "reminder", claim_id)
                 claim = db.get(ReminderDispatch, claim_id)
                 claim.state = "SENT"
                 db.commit()
@@ -542,7 +613,11 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     try:
         for entry in data.get("entry", []):
             for change in entry.get("changes", []):
-                for msg in change.get("value", {}).get("messages", []):
+                value = change.get("value", {})
+                for delivery_event in value.get("statuses", []):
+                    if isinstance(delivery_event, dict):
+                        _track_delivery_status(delivery_event)
+                for msg in value.get("messages", []):
                     if msg.get("type") != "text":
                         continue
                     message_id = msg.get("id", "")
