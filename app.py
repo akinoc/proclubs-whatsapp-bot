@@ -98,6 +98,18 @@ class Reminder2115Dispatch(Base):
     __table_args__ = (UniqueConstraint("user_id", "date", name="uq_reminder_2115_user_day"),)
 
 
+class PaymentRetryDispatch(Base):
+    """One-time retry campaign after billing repair; does not erase daily history."""
+    __tablename__ = "payment_retry_dispatches"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    date = Column(Date, nullable=False)
+    campaign = Column(String(60), nullable=False)
+    state = Column(String(20), nullable=False, default="CLAIMED")
+    claimed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(TZ))
+    __table_args__ = (UniqueConstraint("user_id", "campaign", name="uq_payment_retry_user_campaign"),)
+
+
 class OutgoingDelivery(Base):
     """Meta message ID to delivery-state mapping; no full phone numbers in logs."""
     __tablename__ = "outgoing_deliveries"
@@ -405,6 +417,59 @@ async def dispatch_reminders():
     return {"date": day.isoformat(), "sent": sent, "skipped": skipped, "failed": failed}
 
 
+async def retry_payment_fixed_once():
+    """One-time campaign. Includes previously skipped players, but only current Muallaklar."""
+    day = today()
+    campaign = "payment_fixed_20261009"
+    sent = skipped = failed = 0
+    with SessionLocal() as db:
+        eligible = (
+            db.query(User)
+            .outerjoin(ReminderPreference, ReminderPreference.user_id == User.id)
+            .outerjoin(Attendance, (Attendance.user_id == User.id) & (Attendance.date == day))
+            .filter(
+                User.status == "ACTIVE",
+                or_(ReminderPreference.user_id.is_(None), ReminderPreference.enabled.is_(True)),
+                Attendance.id.is_(None),
+            )
+            .order_by(User.id.asc()).all()
+        )
+        for player in eligible:
+            db.expire_all()
+            if db.query(Attendance.id).filter(Attendance.user_id == player.id, Attendance.date == day).first():
+                skipped += 1
+                continue
+            if not db.query(User.id).filter(User.id == player.id, User.status == "ACTIVE").first():
+                skipped += 1
+                continue
+            if db.query(ReminderPreference.user_id).filter(ReminderPreference.user_id == player.id, ReminderPreference.enabled.is_(False)).first():
+                skipped += 1
+                continue
+            claim = PaymentRetryDispatch(user_id=player.id, date=day, campaign=campaign)
+            db.add(claim)
+            try:
+                db.commit()
+            except IntegrityError:
+                db.rollback()
+                skipped += 1
+                continue
+            try:
+                result = await send_reminder_template(player.phone)
+                for message in result.get("messages", []):
+                    if message.get("id"):
+                        _track_outgoing(message["id"], player.phone, "payment_retry")
+                claim.state = "SENT"
+                db.commit()
+                sent += 1
+            except Exception:
+                claim.state = "ERROR_REVIEW"
+                db.commit()
+                failed += 1
+                logger.exception("PAYMENT_RETRY_FAILED user_id=%s", player.id)
+    logger.info("PAYMENT_RETRY_FINISHED campaign=%s sent=%s skipped=%s failed=%s", campaign, sent, skipped, failed)
+    return {"campaign":campaign, "sent":sent, "skipped":skipped, "failed":failed}
+
+
 async def process(phone, text):
     phone, raw = norm(phone), (text or "").strip()
     cmd = raw.upper()
@@ -557,6 +622,20 @@ async def daily_reminder(request: Request):
         raise HTTPException(status_code=409, detail="Reminder is permitted only 21:15-21:30 Europe/Istanbul")
     # Trigger runs synchronously. At low subscriber counts, response will finish quickly.
     return await dispatch_reminders()
+
+
+@app.post("/jobs/retry-payment-fixed")
+async def retry_payment_fixed(request: Request):
+    """One-off manual retry after resolving Meta 131042. Not used by daily Cron."""
+    if not REMINDER_CRON_SECRET:
+        raise HTTPException(status_code=503, detail="REMINDER_CRON_SECRET is not configured")
+    if not hmac.compare_digest(request.headers.get("x-cron-secret", ""), REMINDER_CRON_SECRET):
+        raise HTTPException(status_code=403, detail="Forbidden")
+    if request.headers.get("x-retry-confirm") != "PAYMENT_FIXED_20261009":
+        raise HTTPException(status_code=400, detail="Missing one-time retry confirmation")
+    if today().isoformat() != "2026-10-09":
+        raise HTTPException(status_code=409, detail="One-time test window ended")
+    return await retry_payment_fixed_once()
 
 
 @app.get("/webhook", response_class=PlainTextResponse)
