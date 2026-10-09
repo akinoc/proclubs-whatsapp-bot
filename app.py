@@ -84,6 +84,20 @@ class ReminderDispatch(Base):
     __table_args__ = (UniqueConstraint("user_id", "date", name="uq_reminder_user_day"),)
 
 
+class Reminder2115Dispatch(Base):
+    """Separate once-per-day claim for the new 21:15 reminder schedule.
+
+    Previous 20:30 attempts remain in the legacy reminder_dispatches table.
+    """
+    __tablename__ = "reminder_2115_dispatches"
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    date = Column(Date, nullable=False)
+    state = Column(String(20), nullable=False, default="CLAIMED")
+    claimed_at = Column(DateTime(timezone=True), default=lambda: datetime.now(TZ))
+    __table_args__ = (UniqueConstraint("user_id", "date", name="uq_reminder_2115_user_day"),)
+
+
 class OutgoingDelivery(Base):
     """Meta message ID to delivery-state mapping; no full phone numbers in logs."""
     __tablename__ = "outgoing_deliveries"
@@ -329,7 +343,7 @@ async def send_reminder_template(phone: str):
 
 
 def _claim_reminder(db, user_id, day):
-    claim = ReminderDispatch(user_id=user_id, date=day, state="CLAIMED")
+    claim = Reminder2115Dispatch(user_id=user_id, date=day, state="CLAIMED")
     db.add(claim)
     try:
         db.commit()
@@ -374,15 +388,15 @@ async def dispatch_reminders():
                 meta_result = await send_reminder_template(user.phone)
                 for message in meta_result.get("messages", []):
                     if message.get("id"):
-                        _track_outgoing(message["id"], user.phone, "reminder", claim_id)
-                claim = db.get(ReminderDispatch, claim_id)
+                        _track_outgoing(message["id"], user.phone, "reminder_2115")
+                claim = db.get(Reminder2115Dispatch, claim_id)
                 claim.state = "SENT"
                 db.commit()
                 sent += 1
             except Exception:
                 # Keep claimed record to avoid blind double sends after a
                 # timeout (Meta may have accepted the request already).
-                claim = db.get(ReminderDispatch, claim_id)
+                claim = db.get(Reminder2115Dispatch, claim_id)
                 claim.state = "ERROR_REVIEW"
                 db.commit()
                 failed += 1
@@ -491,7 +505,7 @@ async def process(phone, text):
             else:
                 preference.enabled = enabled
             db.commit()
-            return ("🔔 Her gün saat 20:00'de, yalnızca cevap vermediğin günlerde "
+            return ("🔔 Her gün saat 21:15'te, yalnızca cevap vermediğin günlerde "
                     "WhatsApp hatırlatmaları yeniden açıldı. İptal: *HATIRLATMA KAPAT*"
                     if enabled else "🔕 Otomatik hatırlatmalar kapatıldı.")
 
@@ -521,7 +535,7 @@ async def process(phone, text):
 
 @app.get("/")
 def root():
-    return {"service": "proclubs-meta-whatsapp-bot", "status": "ok", "version": "2026-10-20h-template"}
+    return {"service": "proclubs-meta-whatsapp-bot", "status": "ok", "version": "2026-10-2115-delivery"}
 
 
 @app.get("/health")
@@ -539,8 +553,8 @@ async def daily_reminder(request: Request):
         raise HTTPException(status_code=403, detail="Forbidden")
     now = datetime.now(TZ)
     # Do not send on accidental early or late scheduler invocations.
-    if now.hour != 20:
-        raise HTTPException(status_code=409, detail="Reminder is permitted only 20:00-20:59 Europe/Istanbul")
+    if now.hour != 21 or now.minute < 15 or now.minute > 30:
+        raise HTTPException(status_code=409, detail="Reminder is permitted only 21:15-21:30 Europe/Istanbul")
     # Trigger runs synchronously. At low subscriber counts, response will finish quickly.
     return await dispatch_reminders()
 
