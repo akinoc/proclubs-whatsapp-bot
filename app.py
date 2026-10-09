@@ -22,7 +22,7 @@ META_GRAPH_VERSION = os.getenv("META_GRAPH_VERSION", "v23.0")
 META_INVITE_TEMPLATE_NAME = os.getenv("META_INVITE_TEMPLATE_NAME", "")
 META_INVITE_TEMPLATE_LANG = os.getenv("META_INVITE_TEMPLATE_LANG", "tr")
 REMINDER_CRON_SECRET = os.getenv("REMINDER_CRON_SECRET", "")
-META_REMINDER_TEMPLATE_NAME = os.getenv("META_REMINDER_TEMPLATE_NAME", "proclubs_hatirlatma")
+META_REMINDER_TEMPLATE_NAME = os.getenv("META_REMINDER_TEMPLATE_NAME", "proclubs_attandance")
 META_REMINDER_TEMPLATE_LANG = os.getenv("META_REMINDER_TEMPLATE_LANG", "tr")
 
 if DATABASE_URL.startswith("postgres://"):
@@ -144,15 +144,15 @@ MUALLAK_FAALIYETLER = [
     "Manikür yaptırıyor 💅",
     "Komşuyla kahve içiyor ☕",
     "Çeyiz bakmaya çıktı 🧵",
-    "Bestie'siyle gelinlik provasında 👰",
+    "Gelinlik provasında 👰",
     "Pazarda indirim kovalıyor 🛍️",
     "Kısır yoğuruyor 🥗",
-    "Pembe dizisinin yeni bölümünü izliyor 📺",
+    "Dizisinin yeni bölümünü izliyor 📺",
     "Börek açıyor 🥐",
     "Dedikodu hattında meşgul 📞",
     "Perde yıkıyor 🧺",
-    "Arkadaşlarıyla konken oynuyor 🥞",
-    "Saç boyasının kurumasını bekliyor 🎨",
+    "Arkadaşlarıyla brunch yapıyor 🥞",
+    "Saç boyası bekliyor 🎨",
 ]
 
 
@@ -420,7 +420,7 @@ async def process(phone, text):
             else:
                 preference.enabled = enabled
             db.commit()
-            return ("🔔 Her gün saat 19:00'da, yalnızca cevap vermediğin günlerde "
+            return ("🔔 Her gün saat 20:00'de, yalnızca cevap vermediğin günlerde "
                     "WhatsApp hatırlatmaları yeniden açıldı. İptal: *HATIRLATMA KAPAT*"
                     if enabled else "🔕 Otomatik hatırlatmalar kapatıldı.")
 
@@ -450,7 +450,7 @@ async def process(phone, text):
 
 @app.get("/")
 def root():
-    return {"service": "proclubs-meta-whatsapp-bot", "status": "ok", "version": "2026-10-daily-reminders"}
+    return {"service": "proclubs-meta-whatsapp-bot", "status": "ok", "version": "2026-10-20h-template"}
 
 
 @app.get("/health")
@@ -468,8 +468,8 @@ async def daily_reminder(request: Request):
         raise HTTPException(status_code=403, detail="Forbidden")
     now = datetime.now(TZ)
     # Do not send on accidental early or late scheduler invocations.
-    if now.hour != 19:
-        raise HTTPException(status_code=409, detail="Reminder is permitted only 19:00-19:59 Europe/Istanbul")
+    if now.hour != 20:
+        raise HTTPException(status_code=409, detail="Reminder is permitted only 20:00-20:59 Europe/Istanbul")
     # Trigger runs synchronously. At low subscriber counts, response will finish quickly.
     return await dispatch_reminders()
 
